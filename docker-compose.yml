@@ -1,0 +1,165 @@
+# =============================================================================
+# Ecosistema de produccion: Next.js + Laravel + MySQL
+# =============================================================================
+# Uso:
+#   cp .env.example .env      # opcional: los valores por defecto permiten
+#   docker compose up --build # un arranque local inmediato
+#
+# En produccion cambia TODOS los secretos y publica solo el frontend detras
+# de un proxy TLS (Nginx/Traefik/Caddy).
+# =============================================================================
+
+name: ecommerce-docker-production
+
+services:
+  # ---------------------------------------------------------------------------
+  # Base de datos
+  # ---------------------------------------------------------------------------
+  db:
+    image: mysql:${MYSQL_VERSION:-8.0}
+    container_name: ecommerce-db
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-ecommerce}
+      MYSQL_USER: ${MYSQL_USER:-ecommerce}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-secret}
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./docker/mysql/init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - backend
+    # Sin seccion `ports`: MySQL no se publica en el host. Solo la API lo
+    # alcanza a traves de la red interna `backend`.
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mysqladmin ping -h 127.0.0.1 -uroot -p$${MYSQL_ROOT_PASSWORD} --silent",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+
+  # ---------------------------------------------------------------------------
+  # API Laravel (Nginx + PHP-FPM)
+  # ---------------------------------------------------------------------------
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        PHP_VERSION: ${PHP_VERSION:-8.4}
+    image: ecommerce-api:${IMAGE_TAG:-local}
+    container_name: ecommerce-api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      APP_NAME: ${APP_NAME:-E-commerce API}
+      APP_ENV: production
+      APP_DEBUG: "false"
+      APP_URL: ${API_URL:-http://localhost:8000}
+      APP_KEY: ${APP_KEY:-}
+      JWT_SECRET: ${JWT_SECRET:-}
+      LOG_CHANNEL: ${LOG_CHANNEL:-stderr}
+      LOG_LEVEL: ${LOG_LEVEL:-warning}
+      DB_CONNECTION: mysql
+      DB_HOST: db
+      DB_PORT: "3306"
+      DB_DATABASE: ${MYSQL_DATABASE:-ecommerce}
+      DB_USERNAME: ${MYSQL_USER:-ecommerce}
+      DB_PASSWORD: ${MYSQL_PASSWORD:-secret}
+      SESSION_DRIVER: database
+      CACHE_STORE: database
+      QUEUE_CONNECTION: database
+      # Seeder idempotente para tener catalogo y usuario admin en la demo.
+      RUN_SEEDER: ${RUN_SEEDER:-true}
+      # Stripe (opcional). Sin claves, el frontend usa el modo demo.
+      STRIPE_KEY: ${STRIPE_KEY:-}
+      STRIPE_SECRET: ${STRIPE_SECRET:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      STRIPE_CURRENCY: ${STRIPE_CURRENCY:-usd}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      STRIPE_SUCCESS_URL: ${FRONTEND_URL:-http://localhost:3000}/checkout/success
+      STRIPE_CANCEL_URL: ${FRONTEND_URL:-http://localhost:3000}/checkout/cancel
+      TAX_RATE: ${TAX_RATE:-0}
+      L5_SWAGGER_GENERATE_ALWAYS: "false"
+    ports:
+      # Solo loopback: la API queda detras del frontend/proxy del host.
+      - "127.0.0.1:${API_PORT:-8000}:8000"
+    networks:
+      - backend
+      - edge
+    stop_grace_period: 30s
+    security_opt:
+      - no-new-privileges:true
+
+  # ---------------------------------------------------------------------------
+  # Frontend Next.js (salida standalone)
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NODE_VERSION: ${NODE_VERSION:-22}
+        # NEXT_PUBLIC_* se inyectan en build time: cambiarlas exige rebuild.
+        NEXT_PUBLIC_SITE_URL: ${FRONTEND_URL:-http://localhost:3000}
+        NEXT_PUBLIC_SITE_NAME: ${SITE_NAME:-Web Vitals Store}
+    image: ecommerce-frontend:${IMAGE_TAG:-local}
+    container_name: ecommerce-frontend
+    restart: unless-stopped
+    init: true
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      # URL interna del API dentro de la red de Compose.
+      API_BASE_URL: http://api:8000
+      API_PREFIX: /api/v1
+      API_TIMEOUT_MS: "8000"
+      NEXT_PUBLIC_SITE_URL: ${FRONTEND_URL:-http://localhost:3000}
+      NEXT_PUBLIC_SITE_NAME: ${SITE_NAME:-Web Vitals Store}
+      # true solo cuando el sitio se sirve por HTTPS.
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
+      DEMO_CHECKOUT_FALLBACK: ${DEMO_CHECKOUT_FALLBACK:-true}
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    networks:
+      - edge
+    healthcheck:
+      test:
+        ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+
+# =============================================================================
+# Redes
+# =============================================================================
+networks:
+  # Red publica del ecosistema (frontend <-> api).
+  edge:
+    driver: bridge
+  # Red interna: la base de datos no tiene salida a Internet ni puertos
+  # publicados. Solo la API la utiliza.
+  backend:
+    driver: bridge
+    internal: true
+
+# =============================================================================
+# Volumenes persistentes
+# =============================================================================
+volumes:
+  mysql-data:

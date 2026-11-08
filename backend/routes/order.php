@@ -1,0 +1,10 @@
+<?php
+
+use App\Http\Controllers\Api\OrderController;
+use Illuminate\Support\Facades\Route;
+
+Route::middleware('auth:api')->group(function () {
+    Route::get('orders', [OrderController::class, 'index']);
+    Route::post('orders', [OrderController::class, 'store']);
+    Route::get('orders/{order}', [OrderController::class, 'show']);
+});

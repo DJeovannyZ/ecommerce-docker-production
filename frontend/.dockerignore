@@ -1,0 +1,16 @@
+.git
+.gitignore
+.next
+node_modules
+coverage
+out
+build
+*.log
+.DS_Store
+README.md
+tsconfig.tsbuildinfo
+
+# Secretos y entorno local
+.env
+.env.*
+!.env.example
